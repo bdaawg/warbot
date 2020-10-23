@@ -9,7 +9,8 @@
 import json
 import pprint
 import numpy as np
-import matplotlib.pyplot as pltlib
+import matplotlib.py
+import WorldVisualizer
 
 
 
@@ -54,6 +55,7 @@ class WarBot:
         self._pop_weight = 0.5
         self._area_weight = 0.1
         self._losers = []
+        self._gui = WorldVisualizer(self._players)
 
 
     def load_players(self, data_file: str) -> dict:
@@ -221,10 +223,11 @@ class WarBot:
                 }
             )
             self.print_players()
+            self.update_gui()
 
 
     def print_players(self):
-        """Auxilizry method for (pretty) printing the remaining states."""
+        """Auxiliary method for (pretty) printing the remaining states."""
         print("Surviving regions are:")
         for p in self._players.keys():
             print("\t{:s}: Population {:d}, Area {:d} km2, Neighbors: {}".format(
@@ -235,6 +238,9 @@ class WarBot:
                 )
             )
 
+    def update_gui(self):
+        """Reload the graphical map after a round has been fought."""
+        self._gui.update_visualization()
 
 
 if __name__ == "__main__":

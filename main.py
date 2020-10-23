@@ -9,7 +9,7 @@ import sys
 
 sys.path.append("src/")
 
-import WarBot
+import warbot
 import WorldSelector
 import HistoricStatistician as hs
 
@@ -20,7 +20,7 @@ def main():
 
     print(__doc__)
     world_file = WorldSelector.select_world()
-    wb = WarBot.WarBot(world_file)
+    wb = warbot.WarBot(world_file)
     wb.run()
 
 
