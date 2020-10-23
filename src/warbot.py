@@ -9,7 +9,7 @@
 import json
 import pprint
 import numpy as np
-import matplotlib.py
+import matplotlib.pyplot as pltlib
 import WorldVisualizer
 
 
