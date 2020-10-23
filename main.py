@@ -14,7 +14,7 @@ import matplotlib.pyplot as pltlib
 
 sys.path.append("src/")
 
-import warbot
+import WarBot
 import WorldSelector
 import AuxiliaryTools
 import HistoricStatistician as hs

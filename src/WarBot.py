@@ -6,12 +6,21 @@
 
 """
 
+import copy
 import json
 import pprint
+import logging
 import numpy as np
+from datetime import datetime
 import matplotlib.pyplot as pltlib
-import WorldVisualizer
 
+import State
+import AuxiliaryTools
+
+
+logger = AuxiliaryTools.setup_logging(__name__, local_level = logging.INFO)
+YEAR = datetime.now().year
+MAX_PARALLEL_BATTLES = 1
 
 
 class WarBot:
@@ -45,28 +54,27 @@ class WarBot:
     """
 
     def __init__(self, data_file: str) -> "WarBot Object":
-        self._players = self.load_players(data_file)
+        self._players = State.load_states_from_json_file(data_file)
         self._players_names = [pn.replace("_", " ").capitalize() for pn in self._players.keys()]
-        self._history = [{"players": self._players_names.copy(),
-                          "n_of_players": len(self._players_names)},]
+        self._world_population = self.compute_world_population()
+        self._year = YEAR
+        self._n_battles = 0
+        self._global_fatalities = 0
+        self._global_pop_increase = 0
+
+        self._history = {
+            "year": [YEAR, ],
+            "states": [self._players_names.copy(), ],
+            "n_of_states": [len(self._players_names), ],
+            "world_population": [self._world_population, ],
+            "n_of_battles": [0, ],
+            "n_of_fatalities": [0, ],
+            "n_of_pop_increse": [0, ],
+        }
         self._n_of_rounds = 0
         self._max_rounds = len(self._players.keys())
 
-        self._pop_weight = 0.5
-        self._area_weight = 0.1
         self._losers = []
-        self._gui = WorldVisualizer(self._players)
-
-
-    def load_players(self, data_file: str) -> dict:
-        """Load the players from the datafile.
-
-        Returns the initial states with their properties in a dictionary. It
-        loads the JSON file and only returns the "states" entry thereof.
-        """
-
-        with open(data_file, "r") as fp:
-            return json.load(fp)["states"]
 
 
     def compute_round(self):
@@ -99,7 +107,7 @@ class WarBot:
         available_players = list(self._players.keys())
         busy_players = []
 
-        for ii in [1,]: # range(20): # TODO parallel version still bugged (not reaching an end because of wrong neighborhood handling)
+        for ii in range(MAX_PARALLEL_BATTLES):
             if len(available_players) > 0:
                 idx = np.random.randint(0, len(available_players))
 
@@ -114,7 +122,7 @@ class WarBot:
                 available_players.remove(p1)
                 busy_players.append(p1)
 
-            available_neighbors = self._players[p1]["neighbors"]
+            available_neighbors = self._players[p1].get_neighbors()
 
             for bp in busy_players:
                 try:
@@ -137,17 +145,19 @@ class WarBot:
     def compute_battles(self, battle_pairs: list):
         """Compute the outcome of all battles specified by the battle_pairs.
 
-        One way of getting battle pairs is to call the get_pairs() method.
+        One way of getting battle pairs is to call the get_pairs() method. All
+        states NOT involved in battles grow in population according to their
+        growth-rate.
         """
 
+        fatalities = 0
         winners = []
         losers = []
         for pp in battle_pairs:
-            strengths = [self._players[p]["area"] * self._area_weight + self._players[p]["pop"] * self._pop_weight for p in pp]
-            tot_s = np.sum(strengths)
-
-            for ii in range(len(strengths)):
-                strengths[ii] /= tot_s
+            strengths = self.compute_battle_strengths(
+                [self._players[p] for p in pp],
+                method = "poparea"
+            )
 
             result = np.random.rand(1)
 
@@ -159,10 +169,17 @@ class WarBot:
                 winner = pp[1]
                 loser = pp[0]
 
+            pop_losses = [self.compute_fatalities(self._players[p].get_population(),
+                rs, result) for p, rs in zip(pp, strengths)]
+            self.update_populations_after_battle(pp, pop_losses)
+            for pl in pop_losses:
+                fatalities += pl
+
             losers.append(loser)
             winners.append(winner)
 
-            print("BATLLE INFO :: Battle between {:s} and {:s} was won by {:s}".format(pp[0], pp[1], winner))
+            logger.info("BATLLE INFO :: Battle between {:s} and {:s} was won by {:s}.".format(pp[0], pp[1], winner))
+            logger.info("BATLLE INFO :: Fatalities: {:s}: {:d} \t {:s}: {:d}.".format(pp[0], pop_losses[0], pp[1], pop_losses[1]))
 
         for w, l in zip(winners, losers):
             self.merge_players(w, l)
@@ -170,39 +187,51 @@ class WarBot:
         self.clean_neighborhoods(losers, winners)
         self._losers += losers
 
+        battling_states = winners + losers
+        self.update_populations_of_non_battling_states(battling_states)
+
+        self._global_fatalities = fatalities
+        self._n_battles = len(battle_pairs)
+
+
+    def update_populations_after_battle(self, players_keys: list, pop_losses: list):
+        """Update the population values after the battle"""
+
+        for pk, pl in zip(players_keys, pop_losses):
+            self._players[pk].update_population_after_battle(pl)
+
+
+    def update_populations_of_non_battling_states(self, battling_states: list):
+        """Update populations of non battling states."""
+
+        global_increase = 0
+        for sn, pp in self._players.items():
+            if not sn in battling_states:
+                delta_p = pp.grow()
+                global_increase += delta_p
+
+        self._global_pop_increase = global_increase
+
 
     def clean_neighborhoods(self, losers: list, winners: list):
         """Update the world after the battles are over in terms of neighborhoods."""
 
         for p in self._players.keys():
-            for l, w in zip(losers, winners):
-                while l in self._players[p]["neighbors"]:
-                    self._players[p]["neighbors"].remove(l)
-                    if p != w and not w in self._players[p]["neighbors"]:
-                        self._players[p]["neighbors"].append(w)
-
-        for p in self._players.keys():
-            self._players[p]["neighbors"] = list(set(self._players[p]["neighbors"]))
+            original_hood = self._players[p].get_neighbors()
+            self._players[p].clean_neighborhood(losers)
+            for w, l in zip(winners, losers):
+                if l in original_hood and w not in self._players[p].get_neighbors():
+                    self._players[p].add_neighbor(w)
 
 
     def merge_players(self, winner: str, loser: str):
         """Merge losers into winners for each battle."""
 
-        for k in self._players[winner].keys():
-            if k != "id":
-                self._players[winner][k] += self._players[loser][k]
-
-        self._players[winner]["neighbors"] = list(set(self._players[winner]["neighbors"]))
-        while winner in self._players[winner]["neighbors"]:
-            self._players[winner]["neighbors"].remove(winner) # Avoid having oneself as a neighbor
-
-        while loser in self._players[winner]["neighbors"]:
-            self._players[winner]["neighbors"].remove(loser) # no longer in the game
-
+        self._players[winner].merge_with(self._players[loser])
         del self._players[loser]
 
 
-    def run(self):
+    def run(self, verbose: bool = False):
         """Run a game.
 
         This is the one method to call them all. It simulates the full game
@@ -210,37 +239,109 @@ class WarBot:
         iterations has been reached.
         """
 
+        print_command = logger.warning
+
+        if verbose:
+            print_command = print
+
         counter = 0
-        while self._n_of_rounds < self._max_rounds and len(self._players.keys()) > 1:
+        while self._n_of_rounds < self._max_rounds and len(self._players_names) > 1:
+            print_command("HISTORY INFO :: Number of remaining states {:d}".format(len(list(self._players.keys()))))
+            print_command("HISTORY INFO :: Round {:d} being computed...".format(counter))
             counter += 1
-            print("HISTORY INFO :: Number of remaining states {:d}".format(len(list(self._players.keys()))))
-            print("HISTORY INFO :: Round {:d} being computed...".format(counter))
+            self._year += 1
             self.compute_round()
-            self._history.append(
-                {
-                    "players": self._players_names.copy(),
-                    "n_of_players": len(self._players_names)
-                }
-            )
+            self._world_population = self.compute_world_population()
+
+            self.update_history()
             self.print_players()
-            self.update_gui()
+
+
+    def update_history(self):
+        """Update history by appending latest values"""
+
+        self._history["year"].append(self._year)
+        self._history["states"].append(self._players_names.copy())
+        self._history["n_of_states"].append(len(self._players_names))
+        self._history["world_population"].append(self._world_population)
+        self._history["n_of_battles"].append(self._n_battles)
+        self._history["n_of_fatalities"].append(self._global_fatalities)
+        self._history["n_of_pop_increse"].append(self._global_pop_increase)
+
+
+    def get_history(self):
+        """Get history safely"""
+
+        return copy.deepcopy(self._history)
 
 
     def print_players(self):
         """Auxiliary method for (pretty) printing the remaining states."""
-        print("Surviving regions are:")
-        for p in self._players.keys():
+
+        print("* Year {:d}, Surviving states are:".format(self._year))
+        for state_name, state in self._players.items():
             print("\t{:s}: Population {:d}, Area {:d} km2, Neighbors: {}".format(
-                p.capitalize(),
-                self._players[p]["pop"],
-                self._players[p]["area"],
-                self._players[p]["neighbors"]
+                state_name.capitalize(),
+                state.get_population(),
+                state.get_area(),
+                state.get_neighbors()
                 )
             )
 
-    def update_gui(self):
-        """Reload the graphical map after a round has been fought."""
-        self._gui.update_visualization()
+        print()
+        print("\tTotal World Population: {:d}\n".format(self._world_population))
+
+
+    def compute_world_population(self) -> int:
+        """Compute world population."""
+
+        return sum([st.get_population() for st in self._players.values()])
+
+
+    @staticmethod
+    def compute_battle_strengths(battle_pair: list, method: str = "poparea") -> list:
+        """Given a battle pair compute the relative strenghts of the contestants
+        and return them in a list of floats.
+
+        <battle_pair> is a list of State-objects
+
+        <method> is a string in ("poparea", ). If an invalid <method> is
+        provided, "poparea" is used. Default method is "poparea".
+        """
+
+        strengths = [bp.compute_battle_strength(method) for bp in battle_pair]
+
+        tot_s = np.sum(strengths)
+        strengths = list(map(lambda x: x / tot_s, strengths))
+
+        return strengths
+
+
+    @staticmethod
+    def compute_fatalities(pop: int, rel_strength: float, battle_outcome: float) -> int:
+        """Compute fatalities occurred in battle
+
+        The fatalities depend on the available population <pop>, the relative
+        strength of the player <rel_strengt> [0, 1], and the battle outcome
+        <battle_outcome> [0, 1]. Function returns at most pop - 1.
+
+        Rationale:
+            1. The loss in population is smaller, the stronger the state is,
+               from here:
+                    loss ~ 1 - rel_strength.
+            2. The loss is higher, the closer the battle outcome was, relative
+               to the strength, from here:
+                    loss ~ 1 - abs(rel_strengt - battle_outcome)
+
+        """
+
+        return min(
+            [
+                int(pop * (1 - rel_strength) * (1 - abs(rel_strength - battle_outcome))),
+                pop - 1
+            ]
+        )
+
 
 
 if __name__ == "__main__":
@@ -248,6 +349,9 @@ if __name__ == "__main__":
     print(__doc__)
     print()
 
-    data = "../worlds/Switzerland/states.json"
+    data = "../worlds/Debugland/states.json"
     wb = WarBot(data)
-    wb.run()
+    wb.run(verbose = False)
+
+    hist = wb.get_history()
+    print(hist)

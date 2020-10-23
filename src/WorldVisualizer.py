@@ -6,7 +6,7 @@
 """
 
 import cartopy.crs as ccrs
-import cartopy.io.shapreader as shpreader
+import cartopy.io.shapereader as shpreader
 import cartopy.feature as cfeature
 
 class WorldVisualizer:
